@@ -256,7 +256,6 @@ export default function PhotosModule() {
     // 3. Pick anchor and inherit coordinates, THEN call Vision API ONLY for Anchors
     let skipVisionForRest = false;
     let rateLimitHit = false;
-    const openCageKey = (import.meta as any).env.VITE_OPENCAGE_API_KEY || '6e597069ff264e60a4a5810358bdfa88';
 
     for (const clusterPhotos of rawClusters) {
       // Pick anchor: Prioritize photos with GPS
@@ -321,123 +320,70 @@ export default function PhotosModule() {
               anchor.lat, 
               anchor.lng, 
               async (lat, lng) => {
-                if (openCageKey) {
-                  const res = await fetch(`https://api.opencagedata.com/geocode/v1/json?q=${lat},${lng}&key=${openCageKey}&language=es&limit=1`);
-                  const data = await res.json();
-                  
-                  if (data.results && data.results.length > 0) {
-                    const components = data.results[0].components;
-                    const annotations = data.results[0].annotations;
-                    
-                    let specificPlace = components.amusement_park || components.theme_park || components.water_park || components.zoo || components.aquarium || components.mall || components.commercial || components.retail || components.amenity || components.leisure || components.shop || components.tourism || components.building || components.historic || components.natural || components.stadium || components.museum || components.park || components.artwork || components.monument || components.attraction || components.water || components.lake || components.gallery || components.poi || components.establishment;
-
-                    const street = components.road || components.pedestrian || components.path || components.square || components.route || components.footway;
-                    const houseNumber = components.house_number || components.street_number;
-                    const neighborhood = components.neighbourhood || components.suburb || components.quarter || components.city_district || components.residential;
-                    const city = components.city || components.town || components.village || components.municipality;
-                    const state = components.state || components.province;
-                    const country = components.country;
-
-                    let streetAddress = street;
-                    if (street && houseNumber) {
-                      streetAddress = `${street} ${houseNumber}`;
-                    }
-
-                    let fullAddressParts = [streetAddress, neighborhood, city, state, country].filter(Boolean);
-                    let fullAddress = fullAddressParts.join(', ');
-
-                    let baseLocation = "";
-                    if (specificPlace) {
-                      baseLocation = fullAddress ? `${specificPlace} (${fullAddress})` : specificPlace;
-                    } else if (fullAddress) {
-                      baseLocation = fullAddress;
-                    } else if (data.results[0].formatted) {
-                      baseLocation = data.results[0].formatted;
-                    } else {
-                      baseLocation = "Ubicación sin nombre";
-                    }
-
-                    if (!skipVisionForRest && (anchor.visionLandmarks?.length || anchor.visionTexts?.length || anchor.visionLabels?.length)) {
-                      try {
-                        const reconciled = await reconcileLocation(lat, lng, baseLocation, {
-                          landmarks: anchor.visionLandmarks || [],
-                          texts: anchor.visionTexts || [],
-                          labels: anchor.visionLabels || []
-                        });
-                        if (reconciled && reconciled !== baseLocation) {
-                          baseLocation = `${reconciled} (${fullAddress || baseLocation})`;
-                        }
-                        await new Promise(resolve => setTimeout(resolve, 4000));
-                      } catch (error: any) {
-                        if (error?.message === 'RATE_LIMIT_EXCEEDED') {
-                          skipVisionForRest = true;
-                          rateLimitHit = true;
-                        }
-                      }
-                    }
-
-                    const w3w = annotations?.what3words?.words;
-                    if (!houseNumber && !components.amenity && !components.leisure && w3w) {
-                      return `${baseLocation} (///${w3w})`;
-                    }
-                    return baseLocation;
-                  }
-                } else {
-                  const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`);
-                  const data = await res.json();
-                  if (data && data.address) {
-                    const addr = data.address;
-                    let specificPlace = data.name || addr.amusement_park || addr.theme_park || addr.water_park || addr.zoo || addr.aquarium || addr.mall || addr.commercial || addr.retail || addr.amenity || addr.leisure || addr.shop || addr.tourism || addr.building || addr.historic || addr.park || addr.artwork || addr.monument || addr.attraction || addr.water || addr.lake || addr.gallery || addr.poi;
-
-                    const street = addr.road || addr.pedestrian || addr.path || addr.square || addr.route || addr.footway;
-                    const houseNumber = addr.house_number || addr.street_number;
-                    const neighborhood = addr.neighbourhood || addr.suburb || addr.quarter || addr.residential;
-                    const city = addr.city || addr.town || addr.village;
-                    const state = addr.state || addr.province;
-                    const country = addr.country;
-
-                    let streetAddress = street;
-                    if (street && houseNumber) {
-                      streetAddress = `${street} ${houseNumber}`;
-                    }
-
-                    let fullAddressParts = [streetAddress, neighborhood, city, state, country].filter(Boolean);
-                    let fullAddress = fullAddressParts.join(', ');
-
-                    let baseLocation = "";
-                    if (specificPlace) {
-                      baseLocation = fullAddress ? `${specificPlace} (${fullAddress})` : specificPlace;
-                    } else if (fullAddress) {
-                      baseLocation = fullAddress;
-                    } else if (data.display_name) {
-                      baseLocation = data.display_name;
-                    } else {
-                      baseLocation = "Ubicación sin nombre";
-                    }
-
-                    if (!skipVisionForRest && (anchor.visionLandmarks?.length || anchor.visionTexts?.length || anchor.visionLabels?.length)) {
-                      try {
-                        const reconciled = await reconcileLocation(lat, lng, baseLocation, {
-                          landmarks: anchor.visionLandmarks || [],
-                          texts: anchor.visionTexts || [],
-                          labels: anchor.visionLabels || []
-                        });
-                        if (reconciled && reconciled !== baseLocation) {
-                          baseLocation = `${reconciled} (${fullAddress || baseLocation})`;
-                        }
-                        await new Promise(resolve => setTimeout(resolve, 4000));
-                      } catch (error: any) {
-                        if (error?.message === 'RATE_LIMIT_EXCEEDED') {
-                          skipVisionForRest = true;
-                          rateLimitHit = true;
-                        }
-                      }
-                    }
-                    
-                    return baseLocation;
-                  }
+                const googleMapsKey = (import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY;
+                if (!googleMapsKey) {
+                  return "Error: Falta VITE_GOOGLE_MAPS_API_KEY";
                 }
-                return "Ubicación no encontrada";
+
+                try {
+                  // Integración nativa con Google Places API (New)
+                  const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Goog-Api-Key': googleMapsKey,
+                      'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
+                    },
+                    body: JSON.stringify({
+                      includedPrimaryTypes: [],
+                      maxResultCount: 1,
+                      locationRestriction: {
+                        circle: {
+                          center: { latitude: lat, longitude: lng },
+                          radius: 50.0 // Búsqueda de alta precisión (~50 metros)
+                        }
+                      }
+                    })
+                  });
+
+                  if (!response.ok) {
+                    throw new Error(`Google Places API Error: ${response.status}`);
+                  }
+
+                  const data = await response.json();
+
+                  if (data.places && data.places.length > 0) {
+                    const place = data.places[0];
+                    const placeName = place.displayName?.text;
+                    const address = place.formattedAddress;
+                    
+                    let baseLocation = placeName || address || "Ubicación sin nombre";
+
+                    if (!skipVisionForRest && (anchor.visionLandmarks?.length || anchor.visionTexts?.length || anchor.visionLabels?.length)) {
+                      try {
+                        const reconciled = await reconcileLocation(lat, lng, baseLocation, {
+                          landmarks: anchor.visionLandmarks || [],
+                          texts: anchor.visionTexts || [],
+                          labels: anchor.visionLabels || []
+                        });
+                        if (reconciled && reconciled !== baseLocation) {
+                          baseLocation = `${reconciled} (${address || baseLocation})`;
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 4000));
+                      } catch (error: any) {
+                        if (error?.message === 'RATE_LIMIT_EXCEEDED') {
+                          skipVisionForRest = true;
+                          rateLimitHit = true;
+                        }
+                      }
+                    }
+                    return baseLocation;
+                  }
+                  return "Ubicación no encontrada";
+                } catch (error) {
+                  console.error("Google Places fetch error:", error);
+                  return "Error en API de lugares";
+                }
               }
             );
             
