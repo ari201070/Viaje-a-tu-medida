@@ -140,11 +140,24 @@ export default function PhotosModule() {
     setRateLimitError(false);
     const newPhotos: ProcessedPhoto[] = [];
 
+    // Safeguard helper para evitar que la UI se congele
+    const withTimeout = <T,>(promise: Promise<T>, ms: number, fallbackValue: T, operationName: string): Promise<T> => {
+      return Promise.race([
+        promise,
+        new Promise<T>((resolve) => setTimeout(() => {
+          console.warn(`[TIMEOUT] La operación '${operationName}' superó los ${ms}ms en colgarse. Usando esquema de emergencia.`);
+          resolve(fallbackValue);
+        }, ms))
+      ]);
+    };
+
     // 1. Extract EXIF data from all photos (NO Vision API yet)
-    for (const file of files) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      console.log(`[PROGRESO] Etapa 1: Procesando foto ${i + 1}/${files.length} - ${file.name}`);
       let url = '';
       try {
-        url = await compressImage(file);
+        url = await withTimeout(compressImage(file), 5000, URL.createObjectURL(file), 'compressImage');
       } catch (e) {
         console.error("Error compressing image", e);
         url = URL.createObjectURL(file); // Fallback
@@ -156,7 +169,8 @@ export default function PhotosModule() {
       let date = file.lastModified;
 
       try {
-        const exifData = await exifr.parse(file);
+        console.log(`[PROGRESO] Etapa 1: Extrayendo metadata EXIF de ${file.name}...`);
+        const exifData = await withTimeout(exifr.parse(file), 3000, null, 'exifr.parse');
         if (exifData) {
           if (exifData.latitude && exifData.longitude) {
             lat = exifData.latitude;
@@ -292,7 +306,13 @@ export default function PhotosModule() {
         // NOW call Vision API ONLY for this Anchor photo to save quota
         if (!skipVisionForRest) {
           try {
-            const visionData = await analyzeImageWithVision(anchor.file);
+            console.log(`[PROGRESO] Etapa 3: Analizando ancla con Vision AI (${anchor.file.name})...`);
+            const visionData = await withTimeout(
+              analyzeImageWithVision(anchor.file),
+              10000, // 10 segundos máximo para la IA
+              { landmarks: [], texts: [], labels: [] },
+              'analyzeImageWithVision'
+            );
             anchor.visionLandmarks = visionData.landmarks;
             anchor.visionTexts = visionData.texts;
             anchor.visionLabels = visionData.labels;
@@ -316,10 +336,12 @@ export default function PhotosModule() {
         // 4. Reverse Geocoding & Semantic Reconciliation for the Anchor
         if (anchor.lat && anchor.lng) {
           try {
-            const resolvedPlace = await spatialCacheService.resolveLocation(
-              anchor.lat, 
-              anchor.lng, 
-              async (lat, lng) => {
+            console.log(`[PROGRESO] Etapa 4: Obteniendo ubicación real para las coordenadas de ancla...`);
+            const resolvedPlace = await withTimeout(
+              spatialCacheService.resolveLocation(
+                anchor.lat, 
+                anchor.lng, 
+                async (lat, lng) => {
                 const googleMapsKey = (import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY;
                 if (!googleMapsKey) {
                   return "Error: Falta VITE_GOOGLE_MAPS_API_KEY";
@@ -385,7 +407,7 @@ export default function PhotosModule() {
                   return "Error en API de lugares";
                 }
               }
-            );
+            ), 10000, { h3Index: '', roundedLat: 0, roundedLng: 0, locationName: "Excedió tiempo de búsqueda", source: 'api' }, 'resolveLocation');
             
             clusterPhotos.forEach(p => {
               p.locationName = resolvedPlace.locationName;
