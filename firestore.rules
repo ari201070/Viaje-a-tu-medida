@@ -1,0 +1,79 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users/{userId}/trips
+    // Document ID: {tripId}
+    // Fields:
+    //   - id: string (required) - Unique identifier for the trip
+    //   - userId: string (required) - ID of the user who owns the trip
+    //   - title: string (required) - Title of the trip
+    //   - description: string (optional) - Short description of the trip
+    //   - coverImage: string (optional) - URL of the cover image
+    //   - createdAt: number (required) - Timestamp of creation
+    //   - updatedAt: number (required) - Timestamp of last update
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function isValidStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+    
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+             (request.resource.data[field] is string &&
+              request.resource.data[field].size() >= minLen &&
+              request.resource.data[field].size() <= maxLen);
+    }
+    
+    function isValidTrip() {
+      return hasRequiredFields(['id', 'userId', 'title', 'createdAt', 'updatedAt']) &&
+             isValidStringLength('id', 1, 100) &&
+             isValidStringLength('userId', 1, 100) &&
+             isValidStringLength('title', 1, 150) &&
+             isValidOptionalString('description', 0, 1000) &&
+             isValidOptionalString('coverImage', 0, 1000) &&
+             request.resource.data.createdAt is number &&
+             request.resource.data.updatedAt is number;
+    }
+    
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId}/trips/{tripId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && 
+                    isValidTrip() && 
+                    request.resource.data.userId == userId;
+      allow update: if isOwner(userId) && 
+                    isValidTrip() && 
+                    request.resource.data.userId == userId &&
+                    request.resource.data.createdAt == resource.data.createdAt &&
+                    request.resource.data.id == resource.data.id;
+      allow delete: if isOwner(userId);
+    }
+  }
+}

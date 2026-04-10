@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "Trip": {
+      "title": "Trip",
+      "description": "A travel itinerary created by a user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the trip."
+        },
+        "userId": {
+          "type": "string",
+          "description": "ID of the user who owns the trip. Null/empty if local."
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the trip."
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of the trip."
+        },
+        "coverImage": {
+          "type": "string",
+          "description": "URL of the cover image."
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Timestamp of last update."
+        }
+      },
+      "required": ["id", "title", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/trips/{tripId}": {
+      "schema": {
+        "$ref": "#/entities/Trip"
+      },
+      "description": "Trips belonging to a specific user."
+    }
+  }
+}
