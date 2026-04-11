@@ -386,34 +386,76 @@ export default function PhotosModule() {
                 }
 
                 try {
-                  // Integración nativa con Google Places API (New)
-                  const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'X-Goog-Api-Key': googleMapsKey,
-                      'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
-                    },
-                    body: JSON.stringify({
-                      includedPrimaryTypes: [],
-                      maxResultCount: 1,
-                      locationRestriction: {
-                        circle: {
-                          center: { latitude: lat, longitude: lng },
-                          radius: 50.0 // Búsqueda de alta precisión (~50 metros)
-                        }
+                  let place = null;
+                  const hasVisionQuery = !skipVisionForRest && (anchor.visionLandmarks?.length || anchor.visionTexts?.length);
+                  
+                  if (hasVisionQuery) {
+                    // 1. Text Search con Vision Text + Location Bias
+                    // Priorizamos Landmark (ej. Obelisco), si no, usamos el texto OCR más largo/prominente
+                    const visionQuery = anchor.visionLandmarks?.[0] || anchor.visionTexts?.[0];
+                    console.log(`[PROGRESO] Etapa 4: Usando Text Search con Vision Query: "${visionQuery}"`);
+                    
+                    const textResponse = await fetch('https://places.googleapis.com/v1/places:searchText', {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'X-Goog-Api-Key': googleMapsKey,
+                        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
+                      },
+                      body: JSON.stringify({
+                        textQuery: visionQuery,
+                        locationBias: {
+                          circle: {
+                            center: { latitude: lat, longitude: lng },
+                            radius: 150.0 // Radio más amplio (150m) para compensar desvío GPS si hay OCR/Landmark
+                          }
+                        },
+                        maxResultCount: 1
+                      })
+                    });
+                    
+                    if (textResponse.ok) {
+                      const textData = await textResponse.json();
+                      if (textData.places && textData.places.length > 0) {
+                        place = textData.places[0];
+                        console.log(`[PROGRESO] Etapa 4: ¡Match semántico exitoso! -> ${place.displayName?.text}`);
                       }
-                    })
-                  });
-
-                  if (!response.ok) {
-                    throw new Error(`Google Places API Error: ${response.status}`);
+                    }
                   }
 
-                  const data = await response.json();
+                  if (!place) {
+                    // 2. Fallback: Search Nearby tradicional basado estrictamente en GPS
+                    console.log(`[PROGRESO] Etapa 4: Buscando lugar por GPS estricto (Search Nearby)...`);
+                    const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'X-Goog-Api-Key': googleMapsKey,
+                        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
+                      },
+                      body: JSON.stringify({
+                        includedPrimaryTypes: [],
+                        maxResultCount: 1,
+                        locationRestriction: {
+                          circle: {
+                            center: { latitude: lat, longitude: lng },
+                            radius: 50.0 // Búsqueda de alta precisión (~50 metros)
+                          }
+                        }
+                      })
+                    });
 
-                  if (data.places && data.places.length > 0) {
-                    const place = data.places[0];
+                    if (!response.ok) {
+                      throw new Error(`Google Places API Error: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    if (data.places && data.places.length > 0) {
+                      place = data.places[0];
+                    }
+                  }
+
+                  if (place) {
                     const placeName = place.displayName?.text;
                     const address = place.formattedAddress;
                     
