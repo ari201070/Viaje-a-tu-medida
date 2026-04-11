@@ -375,6 +375,10 @@ export default function PhotosModule() {
         if (anchor.lat && anchor.lng) {
           try {
             console.log(`[PROGRESO] Etapa 4: Obteniendo ubicación real para las coordenadas de ancla...`);
+            // Semantic Override: si Vision AI tiene evidencia, saltear el caché H3 para forzar searchText
+            const hasSemanticEvidence = !skipVisionForRest && 
+              !!(anchor.visionLandmarks?.length || anchor.visionTexts?.length);
+            
             const resolvedPlace = await withTimeout(
               spatialCacheService.resolveLocation(
                 anchor.lat, 
@@ -487,7 +491,8 @@ export default function PhotosModule() {
                   return "Error en API de lugares";
                 }
               }
-            ), 10000, { h3Index: '', roundedLat: 0, roundedLng: 0, locationName: "Excedió tiempo de búsqueda", source: 'api' }, 'resolveLocation');
+              }, hasSemanticEvidence), 10000, { h3Index: '', roundedLat: 0, roundedLng: 0, locationName: "Excedió tiempo de búsqueda", source: 'api' as const }, 'resolveLocation');
+
             
             clusterPhotos.forEach(p => {
               p.locationName = resolvedPlace.locationName;
