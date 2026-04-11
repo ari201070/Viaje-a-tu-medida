@@ -292,16 +292,66 @@ export default function PhotosModule() {
         // NOW call Vision API ONLY for this Anchor photo to save quota
         if (!skipVisionForRest) {
           try {
+feat/reactive-vision
+            console.log(`[PROGRESO] Etapa 3: Analizando ancla con Vision AI (${anchor.file.name})...`);
+=======
             const visionData = await analyzeImageWithVision(anchor.file);
             anchor.visionLandmarks = visionData.landmarks;
             anchor.visionTexts = visionData.texts;
             anchor.visionLabels = visionData.labels;
+main
             
-            // Recalculate anchor score with new vision data
-            if (anchor.visionLandmarks && anchor.visionLandmarks.length > 0) anchor.internalScore! += 100;
-            if (anchor.visionTexts && anchor.visionTexts.length > 0 && anchor.visionTexts[0].length < 60) anchor.internalScore! += 50;
+            const analyzeAndAssign = async (photoObj: ProcessedPhoto) => {
+              const visionData = await withTimeout(
+                analyzeImageWithVision(photoObj.file),
+                10000, 
+                { landmarks: [], texts: [], labels: [] },
+                'analyzeImageWithVision'
+              );
+              photoObj.visionLandmarks = visionData.landmarks;
+              photoObj.visionTexts = visionData.texts;
+              photoObj.visionLabels = visionData.labels;
+              return visionData;
+            };
 
-            // Delay to respect rate limits (15 RPM = 4s)
+            const hasUsefulVision = (data: { landmarks?: any[], texts?: string[] }) => {
+               return (data.landmarks && data.landmarks.length > 0) || (data.texts && data.texts.some(text => text.trim().length > 3));
+            };
+
+            let visionData = await analyzeAndAssign(anchor);
+            
+            // REACTIVE VISION FALLBACK
+            // Si el ancla no tiene hitos ni texto útil, intentar con hasta 2 fotos secundarias del cluster
+            if (!hasUsefulVision(visionData)) {
+              console.log(`[PROGRESO] Etapa 3: Ancla sin hitos/texto. Intentando con fotos secundarias...`);
+              const fallbackCandidates = clusterPhotos.filter(p => p.id !== anchor.id);
+              let fallbackChecks = 0;
+              for (const fallbackPhoto of fallbackCandidates) {
+                if (fallbackChecks >= 2) break; // Límite de 2 reintentos para cuidar la cuota (Opex)
+                fallbackChecks++;
+                
+                // Respetar el Rate Limit (15 RPM)
+                await new Promise(resolve => setTimeout(resolve, 4000)); 
+                
+                console.log(`[PROGRESO] Etapa 3: Reintento Vision AI en foto secundaria (${fallbackPhoto.file.name})...`);
+                const fallbackData = await analyzeAndAssign(fallbackPhoto);
+                
+                if (hasUsefulVision(fallbackData)) {
+                   console.log(`[PROGRESO] Etapa 3: ¡Hito o Texto vital encontrado en foto secundaria! Fundiendo con el Ancla.`);
+                   // Fundir los datos visuales encontrados en la foto secundaria con el GPS original
+                   anchor.visionLandmarks = fallbackData.landmarks;
+                   anchor.visionTexts = fallbackData.texts;
+                   anchor.visionLabels = fallbackData.labels;
+                   break;
+                }
+              }
+            }
+
+            // Recalculate anchor score with new vision data (Mantenido para compatibilidad de interfaces)
+            if (anchor.visionLandmarks && anchor.visionLandmarks.length > 0) anchor.internalScore = (anchor.internalScore || 0) + 100;
+            if (anchor.visionTexts && anchor.visionTexts.length > 0 && anchor.visionTexts[0].length < 60) anchor.internalScore = (anchor.internalScore || 0) + 50;
+
+            // Delay to respect rate limits antes de pasar al Google Places API o al siguiente cluster
             await new Promise(resolve => setTimeout(resolve, 4000));
           } catch (error: any) {
             if (error?.message === 'RATE_LIMIT_EXCEEDED') {
