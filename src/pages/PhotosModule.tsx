@@ -322,8 +322,8 @@ export default function PhotosModule() {
               return visionData;
             };
 
-            const hasUsefulVision = (data: any) => {
-               return (data.landmarks && data.landmarks.length > 0) || (data.texts && data.texts.length > 0 && data.texts[0].trim().length > 3);
+            const hasUsefulVision = (data: { landmarks?: any[], texts?: string[] }) => {
+               return (data.landmarks && data.landmarks.length > 0) || (data.texts && data.texts.some(text => text.trim().length > 3));
             };
 
             let visionData = await analyzeAndAssign(anchor);
@@ -356,8 +356,8 @@ export default function PhotosModule() {
             }
 
             // Recalculate anchor score with new vision data (Mantenido para compatibilidad de interfaces)
-            if (anchor.visionLandmarks && anchor.visionLandmarks.length > 0) anchor.internalScore! += 100;
-            if (anchor.visionTexts && anchor.visionTexts.length > 0 && anchor.visionTexts[0].length < 60) anchor.internalScore! += 50;
+            if (anchor.visionLandmarks && anchor.visionLandmarks.length > 0) anchor.internalScore = (anchor.internalScore || 0) + 100;
+            if (anchor.visionTexts && anchor.visionTexts.length > 0 && anchor.visionTexts[0].length < 60) anchor.internalScore = (anchor.internalScore || 0) + 50;
 
             // Delay to respect rate limits antes de pasar al Google Places API o al siguiente cluster
             await new Promise(resolve => setTimeout(resolve, 4000));
