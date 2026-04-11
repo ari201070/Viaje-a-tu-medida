@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Image as ImageIcon, Upload, MapPin, Clock, Info, Loader2, ArrowLeft, Cloud, Search, AlertTriangle, X, FolderInput, AlertCircle } from 'lucide-react';
@@ -67,6 +67,12 @@ export default function PhotosModule() {
   const [fileLimitWarning, setFileLimitWarning] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-purga de entradas expiradas o legacy (sin cachedAt) al montar el componente.
+  // Esto elimina automáticamente resultados incorrectos sin que el usuario toque el LocalStorage.
+  useEffect(() => {
+    spatialCacheService.purgeExpired();
+  }, []);
 
   if (!trip) return null;
 
