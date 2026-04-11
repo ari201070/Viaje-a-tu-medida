@@ -316,23 +316,10 @@ export default function PhotosModule() {
         // 4. Reverse Geocoding & Semantic Reconciliation for the Anchor
         if (anchor.lat && anchor.lng) {
           try {
- fix/semantic-text-search
-            console.log(`[PROGRESO] Etapa 4: Obteniendo ubicación real para las coordenadas de ancla...`);
-            // Semantic Override: si Vision AI tiene evidencia, saltear el caché H3 para forzar searchText
-            const hasSemanticEvidence = !skipVisionForRest && 
-              !!(anchor.visionLandmarks?.length || anchor.visionTexts?.length);
-            
-            const resolvedPlace = await withTimeout(
-              spatialCacheService.resolveLocation(
-                anchor.lat, 
-                anchor.lng, 
-                async (lat, lng) => {
-=======
             const resolvedPlace = await spatialCacheService.resolveLocation(
               anchor.lat, 
               anchor.lng, 
               async (lat, lng) => {
- main
                 const googleMapsKey = (import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY;
                 if (!googleMapsKey) {
                   return "Error: Falta VITE_GOOGLE_MAPS_API_KEY";
@@ -398,12 +385,7 @@ export default function PhotosModule() {
                   return "Error en API de lugares";
                 }
               }
- fix/semantic-text-search
-              }, hasSemanticEvidence), 10000, { h3Index: '', roundedLat: 0, roundedLng: 0, locationName: "Excedió tiempo de búsqueda", source: 'api' as const }, 'resolveLocation');
-
-=======
             );
- main
             
             clusterPhotos.forEach(p => {
               p.locationName = resolvedPlace.locationName;
