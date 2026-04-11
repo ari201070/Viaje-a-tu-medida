@@ -140,24 +140,11 @@ export default function PhotosModule() {
     setRateLimitError(false);
     const newPhotos: ProcessedPhoto[] = [];
 
-    // Safeguard helper para evitar que la UI se congele
-    const withTimeout = <T,>(promise: Promise<T>, ms: number, fallbackValue: T, operationName: string): Promise<T> => {
-      return Promise.race([
-        promise,
-        new Promise<T>((resolve) => setTimeout(() => {
-          console.warn(`[TIMEOUT] La operación '${operationName}' superó los ${ms}ms en colgarse. Usando esquema de emergencia.`);
-          resolve(fallbackValue);
-        }, ms))
-      ]);
-    };
-
     // 1. Extract EXIF data from all photos (NO Vision API yet)
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      console.log(`[PROGRESO] Etapa 1: Procesando foto ${i + 1}/${files.length} - ${file.name}`);
+    for (const file of files) {
       let url = '';
       try {
-        url = await withTimeout(compressImage(file), 5000, URL.createObjectURL(file), 'compressImage');
+        url = await compressImage(file);
       } catch (e) {
         console.error("Error compressing image", e);
         url = URL.createObjectURL(file); // Fallback
@@ -169,8 +156,7 @@ export default function PhotosModule() {
       let date = file.lastModified;
 
       try {
-        console.log(`[PROGRESO] Etapa 1: Extrayendo metadata EXIF de ${file.name}...`);
-        const exifData = await withTimeout(exifr.parse(file), 3000, null, 'exifr.parse');
+        const exifData = await exifr.parse(file);
         if (exifData) {
           if (exifData.latitude && exifData.longitude) {
             lat = exifData.latitude;
@@ -220,10 +206,10 @@ export default function PhotosModule() {
       return R * c;
     };
 
-    // 2. Modo Puzzle: Clustering Espacial (Distancia) y Temporal (20 min)
-    const TIME_WINDOW_MS = 20 * 60 * 1000; // 20 minutos (Ruptura por cambio de actividad)
-    const INHERIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
-    const DISTANCE_THRESHOLD_M = 100; // 100 metros de tolerancia (Una cuadra real)
+    // 2. Modo Puzzle: Clustering Espacial (Distancia) y Temporal (60 min)
+    const TIME_WINDOW_MS = 3600 * 1000; // 60 minutos
+    const INHERIT_WINDOW_MS = 900 * 1000; // 15 minutos
+    const DISTANCE_THRESHOLD_M = 300; // 300 metros de tolerancia entre fotos consecutivas
 
     const rawClusters: ProcessedPhoto[][] = [];
     let currentCluster: ProcessedPhoto[] = [newPhotos[0]];
@@ -272,16 +258,15 @@ export default function PhotosModule() {
     let rateLimitHit = false;
 
     for (const clusterPhotos of rawClusters) {
-      // Pick anchor: Prioritize photos with GPS, then pick the MEDIAN (center of the activity)
-      const photosWithGps = clusterPhotos.filter(p => p.lat != null && p.lng != null);
-      const candidates = photosWithGps.length > 0 ? photosWithGps : clusterPhotos;
+      // Pick anchor: Prioritize photos with GPS
+      const scored = clusterPhotos.map(p => {
+        let score = 0;
+        if (p.lat != null && p.lng != null) score += 1000;
+        p.internalScore = score;
+        return p;
+      });
       
-      // Asegurar orden cronológico de los candidatos
-      const sortedCandidates = [...candidates].sort((a, b) => (a.date || 0) - (b.date || 0));
-      
-      // Elegir la foto central del evento
-      const medianIndex = Math.floor(sortedCandidates.length / 2);
-      const bestAnchor = sortedCandidates[medianIndex];
+      const bestAnchor = scored.sort((a, b) => (b.internalScore || 0) - (a.internalScore || 0) || ((a.date || 0) - (b.date || 0)))[0];
       const anchor = clusterPhotos.find(p => p.id === bestAnchor.id);
 
       if (anchor) {
@@ -307,7 +292,14 @@ export default function PhotosModule() {
         // NOW call Vision API ONLY for this Anchor photo to save quota
         if (!skipVisionForRest) {
           try {
+feat/reactive-vision
             console.log(`[PROGRESO] Etapa 3: Analizando ancla con Vision AI (${anchor.file.name})...`);
+=======
+            const visionData = await analyzeImageWithVision(anchor.file);
+            anchor.visionLandmarks = visionData.landmarks;
+            anchor.visionTexts = visionData.texts;
+            anchor.visionLabels = visionData.labels;
+main
             
             const analyzeAndAssign = async (photoObj: ProcessedPhoto) => {
               const visionData = await withTimeout(
@@ -374,12 +366,10 @@ export default function PhotosModule() {
         // 4. Reverse Geocoding & Semantic Reconciliation for the Anchor
         if (anchor.lat && anchor.lng) {
           try {
-            console.log(`[PROGRESO] Etapa 4: Obteniendo ubicación real para las coordenadas de ancla...`);
-            const resolvedPlace = await withTimeout(
-              spatialCacheService.resolveLocation(
-                anchor.lat, 
-                anchor.lng, 
-                async (lat, lng) => {
+            const resolvedPlace = await spatialCacheService.resolveLocation(
+              anchor.lat, 
+              anchor.lng, 
+              async (lat, lng) => {
                 const googleMapsKey = (import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY;
                 if (!googleMapsKey) {
                   return "Error: Falta VITE_GOOGLE_MAPS_API_KEY";
@@ -445,7 +435,7 @@ export default function PhotosModule() {
                   return "Error en API de lugares";
                 }
               }
-            ), 10000, { h3Index: '', roundedLat: 0, roundedLng: 0, locationName: "Excedió tiempo de búsqueda", source: 'api' }, 'resolveLocation');
+            );
             
             clusterPhotos.forEach(p => {
               p.locationName = resolvedPlace.locationName;
@@ -461,6 +451,42 @@ export default function PhotosModule() {
           try {
             const searchQuery = anchor.visionLandmarks?.length ? anchor.visionLandmarks[0] : anchor.visionTexts![0];
             let locationName = `Ubicación inferida: ${searchQuery}`;
+            
+            if (openCageKey) {
+              const res = await fetch(`https://api.opencagedata.com/geocode/v1/json?q=${encodeURIComponent(searchQuery)}&key=${openCageKey}&language=es&limit=1`);
+              const data = await res.json();
+              
+              if (data.results && data.results.length > 0) {
+                const result = data.results[0];
+                anchor.lat = result.geometry.lat;
+                anchor.lng = result.geometry.lng;
+                
+                const baseLocation = result.formatted;
+                if (!skipVisionForRest) {
+                  try {
+                    const reconciled = await reconcileLocation(anchor.lat, anchor.lng, baseLocation, {
+                      landmarks: anchor.visionLandmarks || [],
+                      texts: anchor.visionTexts || [],
+                      labels: anchor.visionLabels || []
+                    });
+                    
+                    if (reconciled && reconciled !== baseLocation) {
+                      locationName = `${reconciled} (${baseLocation.split(',')[0]})`;
+                    } else {
+                      locationName = result.formatted.split(',')[0];
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 4000));
+                  } catch (error: any) {
+                    if (error?.message === 'RATE_LIMIT_EXCEEDED') {
+                      skipVisionForRest = true;
+                      rateLimitHit = true;
+                    }
+                  }
+                } else {
+                  locationName = result.formatted.split(',')[0];
+                }
+              }
+            }
             
             clusterPhotos.forEach(p => {
               p.locationName = locationName;
@@ -523,7 +549,7 @@ export default function PhotosModule() {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
     
-    let files = Array.from(e.target.files) as File[];
+    let files = Array.from(e.target.files);
     if (files.length > 50) {
       setFileLimitWarning(true);
       files = files.slice(0, 50);
