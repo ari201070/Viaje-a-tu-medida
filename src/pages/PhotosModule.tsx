@@ -146,24 +146,11 @@ export default function PhotosModule() {
     setRateLimitError(false);
     const newPhotos: ProcessedPhoto[] = [];
 
-    // Safeguard helper para evitar que la UI se congele
-    const withTimeout = <T,>(promise: Promise<T>, ms: number, fallbackValue: T, operationName: string): Promise<T> => {
-      return Promise.race([
-        promise,
-        new Promise<T>((resolve) => setTimeout(() => {
-          console.warn(`[TIMEOUT] La operación '${operationName}' superó los ${ms}ms en colgarse. Usando esquema de emergencia.`);
-          resolve(fallbackValue);
-        }, ms))
-      ]);
-    };
-
     // 1. Extract EXIF data from all photos (NO Vision API yet)
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      console.log(`[PROGRESO] Etapa 1: Procesando foto ${i + 1}/${files.length} - ${file.name}`);
+    for (const file of files) {
       let url = '';
       try {
-        url = await withTimeout(compressImage(file), 5000, URL.createObjectURL(file), 'compressImage');
+        url = await compressImage(file);
       } catch (e) {
         console.error("Error compressing image", e);
         url = URL.createObjectURL(file); // Fallback
@@ -175,8 +162,7 @@ export default function PhotosModule() {
       let date = file.lastModified;
 
       try {
-        console.log(`[PROGRESO] Etapa 1: Extrayendo metadata EXIF de ${file.name}...`);
-        const exifData = await withTimeout(exifr.parse(file), 3000, null, 'exifr.parse');
+        const exifData = await exifr.parse(file);
         if (exifData) {
           if (exifData.latitude && exifData.longitude) {
             lat = exifData.latitude;
@@ -226,10 +212,10 @@ export default function PhotosModule() {
       return R * c;
     };
 
-    // 2. Modo Puzzle: Clustering Espacial (Distancia) y Temporal (20 min)
-    const TIME_WINDOW_MS = 20 * 60 * 1000; // 20 minutos (Ruptura por cambio de actividad)
-    const INHERIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutos
-    const DISTANCE_THRESHOLD_M = 100; // 100 metros de tolerancia (Una cuadra real)
+    // 2. Modo Puzzle: Clustering Espacial (Distancia) y Temporal (60 min)
+    const TIME_WINDOW_MS = 3600 * 1000; // 60 minutos
+    const INHERIT_WINDOW_MS = 900 * 1000; // 15 minutos
+    const DISTANCE_THRESHOLD_M = 300; // 300 metros de tolerancia entre fotos consecutivas
 
     const rawClusters: ProcessedPhoto[][] = [];
     let currentCluster: ProcessedPhoto[] = [newPhotos[0]];
@@ -278,16 +264,15 @@ export default function PhotosModule() {
     let rateLimitHit = false;
 
     for (const clusterPhotos of rawClusters) {
-      // Pick anchor: Prioritize photos with GPS, then pick the MEDIAN (center of the activity)
-      const photosWithGps = clusterPhotos.filter(p => p.lat != null && p.lng != null);
-      const candidates = photosWithGps.length > 0 ? photosWithGps : clusterPhotos;
+      // Pick anchor: Prioritize photos with GPS
+      const scored = clusterPhotos.map(p => {
+        let score = 0;
+        if (p.lat != null && p.lng != null) score += 1000;
+        p.internalScore = score;
+        return p;
+      });
       
-      // Asegurar orden cronológico de los candidatos
-      const sortedCandidates = [...candidates].sort((a, b) => (a.date || 0) - (b.date || 0));
-      
-      // Elegir la foto central del evento
-      const medianIndex = Math.floor(sortedCandidates.length / 2);
-      const bestAnchor = sortedCandidates[medianIndex];
+      const bestAnchor = scored.sort((a, b) => (b.internalScore || 0) - (a.internalScore || 0) || ((a.date || 0) - (b.date || 0)))[0];
       const anchor = clusterPhotos.find(p => p.id === bestAnchor.id);
 
       if (anchor) {
@@ -313,59 +298,16 @@ export default function PhotosModule() {
         // NOW call Vision API ONLY for this Anchor photo to save quota
         if (!skipVisionForRest) {
           try {
-            console.log(`[PROGRESO] Etapa 3: Analizando ancla con Vision AI (${anchor.file.name})...`);
+            const visionData = await analyzeImageWithVision(anchor.file);
+            anchor.visionLandmarks = visionData.landmarks;
+            anchor.visionTexts = visionData.texts;
+            anchor.visionLabels = visionData.labels;
             
-            const analyzeAndAssign = async (photoObj: ProcessedPhoto) => {
-              const visionData = await withTimeout(
-                analyzeImageWithVision(photoObj.file),
-                10000, 
-                { landmarks: [], texts: [], labels: [] },
-                'analyzeImageWithVision'
-              );
-              photoObj.visionLandmarks = visionData.landmarks;
-              photoObj.visionTexts = visionData.texts;
-              photoObj.visionLabels = visionData.labels;
-              return visionData;
-            };
+            // Recalculate anchor score with new vision data
+            if (anchor.visionLandmarks && anchor.visionLandmarks.length > 0) anchor.internalScore! += 100;
+            if (anchor.visionTexts && anchor.visionTexts.length > 0 && anchor.visionTexts[0].length < 60) anchor.internalScore! += 50;
 
-            const hasUsefulVision = (data: { landmarks?: any[], texts?: string[] }) => {
-               return (data.landmarks && data.landmarks.length > 0) || (data.texts && data.texts.some(text => text.trim().length > 3));
-            };
-
-            let visionData = await analyzeAndAssign(anchor);
-            
-            // REACTIVE VISION FALLBACK
-            // Si el ancla no tiene hitos ni texto útil, intentar con hasta 2 fotos secundarias del cluster
-            if (!hasUsefulVision(visionData)) {
-              console.log(`[PROGRESO] Etapa 3: Ancla sin hitos/texto. Intentando con fotos secundarias...`);
-              const fallbackCandidates = clusterPhotos.filter(p => p.id !== anchor.id);
-              let fallbackChecks = 0;
-              for (const fallbackPhoto of fallbackCandidates) {
-                if (fallbackChecks >= 2) break; // Límite de 2 reintentos para cuidar la cuota (Opex)
-                fallbackChecks++;
-                
-                // Respetar el Rate Limit (15 RPM)
-                await new Promise(resolve => setTimeout(resolve, 4000)); 
-                
-                console.log(`[PROGRESO] Etapa 3: Reintento Vision AI en foto secundaria (${fallbackPhoto.file.name})...`);
-                const fallbackData = await analyzeAndAssign(fallbackPhoto);
-                
-                if (hasUsefulVision(fallbackData)) {
-                   console.log(`[PROGRESO] Etapa 3: ¡Hito o Texto vital encontrado en foto secundaria! Fundiendo con el Ancla.`);
-                   // Fundir los datos visuales encontrados en la foto secundaria con el GPS original
-                   anchor.visionLandmarks = fallbackData.landmarks;
-                   anchor.visionTexts = fallbackData.texts;
-                   anchor.visionLabels = fallbackData.labels;
-                   break;
-                }
-              }
-            }
-
-            // Recalculate anchor score with new vision data (Mantenido para compatibilidad de interfaces)
-            if (anchor.visionLandmarks && anchor.visionLandmarks.length > 0) anchor.internalScore = (anchor.internalScore || 0) + 100;
-            if (anchor.visionTexts && anchor.visionTexts.length > 0 && anchor.visionTexts[0].length < 60) anchor.internalScore = (anchor.internalScore || 0) + 50;
-
-            // Delay to respect rate limits antes de pasar al Google Places API o al siguiente cluster
+            // Delay to respect rate limits (15 RPM = 4s)
             await new Promise(resolve => setTimeout(resolve, 4000));
           } catch (error: any) {
             if (error?.message === 'RATE_LIMIT_EXCEEDED') {
@@ -380,92 +322,44 @@ export default function PhotosModule() {
         // 4. Reverse Geocoding & Semantic Reconciliation for the Anchor
         if (anchor.lat && anchor.lng) {
           try {
-            console.log(`[PROGRESO] Etapa 4: Obteniendo ubicación real para las coordenadas de ancla...`);
-            // Semantic Override: si Vision AI tiene evidencia, saltear el caché H3 para forzar searchText
-            const hasSemanticEvidence = !skipVisionForRest && 
-              !!(anchor.visionLandmarks?.length || anchor.visionTexts?.length);
-            
-            const resolvedPlace = await withTimeout(
-              spatialCacheService.resolveLocation(
-                anchor.lat, 
-                anchor.lng, 
-                async (lat, lng) => {
+            const resolvedPlace = await spatialCacheService.resolveLocation(
+              anchor.lat, 
+              anchor.lng, 
+              async (lat, lng) => {
                 const googleMapsKey = (import.meta as any).env.VITE_GOOGLE_MAPS_API_KEY;
                 if (!googleMapsKey) {
                   return "Error: Falta VITE_GOOGLE_MAPS_API_KEY";
                 }
 
                 try {
-                  let place = null;
-                  const hasVisionQuery = !skipVisionForRest && (anchor.visionLandmarks?.length || anchor.visionTexts?.length);
-                  
-                  if (hasVisionQuery) {
-                    // 1. Text Search con Vision Text + Location Bias
-                    // Priorizamos Landmark (ej. Obelisco), si no, usamos el texto OCR más largo/prominente
-                    const visionQuery = anchor.visionLandmarks?.[0] || anchor.visionTexts?.[0];
-                    console.log(`[PROGRESO] Etapa 4: Usando Text Search con Vision Query: "${visionQuery}"`);
-                    
-                    const textResponse = await fetch('https://places.googleapis.com/v1/places:searchText', {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'X-Goog-Api-Key': googleMapsKey,
-                        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
-                      },
-                      body: JSON.stringify({
-                        textQuery: visionQuery,
-                        locationBias: {
-                          circle: {
-                            center: { latitude: lat, longitude: lng },
-                            radius: 150.0 // Radio más amplio (150m) para compensar desvío GPS si hay OCR/Landmark
-                          }
-                        },
-                        maxResultCount: 1
-                      })
-                    });
-                    
-                    if (textResponse.ok) {
-                      const textData = await textResponse.json();
-                      if (textData.places && textData.places.length > 0) {
-                        place = textData.places[0];
-                        console.log(`[PROGRESO] Etapa 4: ¡Match semántico exitoso! -> ${place.displayName?.text}`);
-                      }
-                    }
-                  }
-
-                  if (!place) {
-                    // 2. Fallback: Search Nearby tradicional basado estrictamente en GPS
-                    console.log(`[PROGRESO] Etapa 4: Buscando lugar por GPS estricto (Search Nearby)...`);
-                    const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'X-Goog-Api-Key': googleMapsKey,
-                        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
-                      },
-                      body: JSON.stringify({
-                        includedPrimaryTypes: [],
-                        maxResultCount: 1,
-                        locationRestriction: {
-                          circle: {
-                            center: { latitude: lat, longitude: lng },
-                            radius: 50.0 // Búsqueda de alta precisión (~50 metros)
-                          }
+                  // Integración nativa con Google Places API (New)
+                  const response = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Goog-Api-Key': googleMapsKey,
+                      'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types'
+                    },
+                    body: JSON.stringify({
+                      includedPrimaryTypes: [],
+                      maxResultCount: 1,
+                      locationRestriction: {
+                        circle: {
+                          center: { latitude: lat, longitude: lng },
+                          radius: 50.0 // Búsqueda de alta precisión (~50 metros)
                         }
-                      })
-                    });
+                      }
+                    })
+                  });
 
-                    if (!response.ok) {
-                      throw new Error(`Google Places API Error: ${response.status}`);
-                    }
-
-                    const data = await response.json();
-                    if (data.places && data.places.length > 0) {
-                      place = data.places[0];
-                    }
+                  if (!response.ok) {
+                    throw new Error(`Google Places API Error: ${response.status}`);
                   }
 
-                  if (place) {
+                  const data = await response.json();
+
+                  if (data.places && data.places.length > 0) {
+                    const place = data.places[0];
                     const placeName = place.displayName?.text;
                     const address = place.formattedAddress;
                     
@@ -497,8 +391,7 @@ export default function PhotosModule() {
                   return "Error en API de lugares";
                 }
               }
-              }, hasSemanticEvidence), 10000, { h3Index: '', roundedLat: 0, roundedLng: 0, locationName: "Excedió tiempo de búsqueda", source: 'api' as const }, 'resolveLocation');
-
+            );
             
             clusterPhotos.forEach(p => {
               p.locationName = resolvedPlace.locationName;
@@ -514,6 +407,42 @@ export default function PhotosModule() {
           try {
             const searchQuery = anchor.visionLandmarks?.length ? anchor.visionLandmarks[0] : anchor.visionTexts![0];
             let locationName = `Ubicación inferida: ${searchQuery}`;
+            
+            if (openCageKey) {
+              const res = await fetch(`https://api.opencagedata.com/geocode/v1/json?q=${encodeURIComponent(searchQuery)}&key=${openCageKey}&language=es&limit=1`);
+              const data = await res.json();
+              
+              if (data.results && data.results.length > 0) {
+                const result = data.results[0];
+                anchor.lat = result.geometry.lat;
+                anchor.lng = result.geometry.lng;
+                
+                const baseLocation = result.formatted;
+                if (!skipVisionForRest) {
+                  try {
+                    const reconciled = await reconcileLocation(anchor.lat, anchor.lng, baseLocation, {
+                      landmarks: anchor.visionLandmarks || [],
+                      texts: anchor.visionTexts || [],
+                      labels: anchor.visionLabels || []
+                    });
+                    
+                    if (reconciled && reconciled !== baseLocation) {
+                      locationName = `${reconciled} (${baseLocation.split(',')[0]})`;
+                    } else {
+                      locationName = result.formatted.split(',')[0];
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 4000));
+                  } catch (error: any) {
+                    if (error?.message === 'RATE_LIMIT_EXCEEDED') {
+                      skipVisionForRest = true;
+                      rateLimitHit = true;
+                    }
+                  }
+                } else {
+                  locationName = result.formatted.split(',')[0];
+                }
+              }
+            }
             
             clusterPhotos.forEach(p => {
               p.locationName = locationName;
@@ -576,7 +505,7 @@ export default function PhotosModule() {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
     
-    let files = Array.from(e.target.files) as File[];
+    let files = Array.from(e.target.files);
     if (files.length > 50) {
       setFileLimitWarning(true);
       files = files.slice(0, 50);

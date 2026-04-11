@@ -55,6 +55,7 @@ class SpatialCache {
   /**
    * Resuelve una ubicación utilizando la Lógica de Cascada.
    * Prioriza el Índice H3 y las coordenadas redondeadas antes de llamar a la API.
+ fix/cache-ttl
    *
    * @param bypassCache - Si es true, ignora el caché H3 y fuerza una llamada a la API.
    *   Usar cuando Vision AI tiene evidencia semántica (OCR/Landmark) que supera el GPS.
@@ -64,6 +65,13 @@ class SpatialCache {
     lng: number,
     fetchFromApi: (lat: number, lng: number) => Promise<string>,
     bypassCache = false
+=======
+   */
+  public async resolveLocation(
+    lat: number, 
+    lng: number, 
+    fetchFromApi: (lat: number, lng: number) => Promise<string>
+ main
   ): Promise<KnownPlace> {
     const rLat = roundCoord(lat);
     const rLng = roundCoord(lng);
@@ -72,6 +80,7 @@ class SpatialCache {
     const cache = this.getCache();
 
     // NIVEL 1: Caché Local (H3 + Redondeo a 4 decimales)
+ fix/cache-ttl
     // Se salta si:
     //   a) bypassCache=true (Semantic Override activo por Vision AI)
     //   b) La entrada no tiene cachedAt (legacy/corrupta) → auto-expirada
@@ -82,6 +91,13 @@ class SpatialCache {
       );
       if (existingPlace && !this.isExpired(existingPlace)) {
         console.log(`[OPEX SAVED] Cache hit para H3: ${h3Index}. Costo: $0`);
+=======
+    if (cache[h3Index]) {
+      // Buscamos una colisión deliberada en la misma celda H3 y coordenadas truncadas
+      const existingPlace = cache[h3Index].find(p => p.roundedLat === rLat && p.roundedLng === rLng);
+      if (existingPlace) {
+        console.log(`[OPEX SAVED] Cache hit for H3: ${h3Index}. Costo: $0`);
+ main
         return { ...existingPlace, source: 'cache' };
       }
       if (existingPlace && this.isExpired(existingPlace)) {
@@ -89,12 +105,17 @@ class SpatialCache {
       }
     }
 
+ fix/cache-ttl
     if (bypassCache) {
       console.log(`[SEMANTIC OVERRIDE] Cache ignorado para H3: ${h3Index}. Vision AI tiene evidencia semántica prioritaria.`);
     } else {
       console.log(`[API CALL] Cache miss para H3: ${h3Index}. Consultando API externa...`);
     }
 
+=======
+    // NIVEL 2: Open Data (OpenCage / OSM) - Fallback
+    console.log(`[API CALL] Cache miss for H3: ${h3Index}. Consultando API externa...`);
+ main
     const locationName = await fetchFromApi(lat, lng);
 
     const newPlace: KnownPlace = {
@@ -106,6 +127,7 @@ class SpatialCache {
       cachedAt: Date.now() // Siempre guardar el timestamp
     };
 
+ fix/cache-ttl
     // Sobreescribir la "Memoria Colectiva" con el resultado más reciente
     if (!cache[h3Index]) {
       cache[h3Index] = [];
@@ -114,11 +136,18 @@ class SpatialCache {
     cache[h3Index] = cache[h3Index].filter(
       p => !(p.roundedLat === rLat && p.roundedLng === rLng)
     );
+=======
+    // Guardar en la "Memoria Colectiva" (Tabla de persistencia)
+    if (!cache[h3Index]) {
+      cache[h3Index] = [];
+    }
+ main
     cache[h3Index].push(newPlace);
     this.saveCache(cache);
 
     return newPlace;
   }
+ fix/cache-ttl
 
   /**
    * Invalida una celda H3 específica del caché local.
@@ -155,6 +184,8 @@ class SpatialCache {
       console.log(`[CACHE PURGE] ${purgado} entradas expiradas/legacy eliminadas.`);
     }
   }
+=======
+ main
 }
 
 export const spatialCacheService = new SpatialCache();
